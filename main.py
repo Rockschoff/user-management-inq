@@ -254,7 +254,7 @@ no_selection = st.session_state.selected_rows.empty
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    if st.button("➕ Add New User(s)", use_container_width=True):
+    if st.button("➕ Add New User(s)", use_container_width=True , disabled=True):
         add_users_dialog()
 with col2:
     if st.button("🔑 Reset Password...", use_container_width=True, disabled=no_selection):
