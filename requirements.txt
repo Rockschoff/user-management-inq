@@ -1,0 +1,6 @@
+pandas
+streamlit
+firebase
+pymongo
+openpyxl
+firbase_admin
