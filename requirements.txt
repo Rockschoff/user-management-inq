@@ -3,4 +3,4 @@ streamlit
 firebase
 pymongo
 openpyxl
-firbase_admin
+firebase_admin
