@@ -72,6 +72,26 @@ else:
 
 # --- Core Functions ---
 
+def add_user_to_mongodb(uid, email):
+    """Checks if a user exists in MongoDB and adds them if not."""
+    if mongodb_collection is None:
+        st.warning(f"MongoDB not connected. Could not sync user {email}.")
+        return
+    try:
+        if mongodb_collection.find_one({"userId": uid}):
+            st.toast(f"User {email} already exists in MongoDB.", icon="ℹ️")
+        else:
+            user_doc = {
+                "userId": uid,
+                "userEmail": email,
+                "userName": "",
+                "threads": []
+            }
+            mongodb_collection.insert_one(user_doc)
+            st.toast(f"User {email} synced to MongoDB.", icon="📦")
+    except Exception as e:
+        st.error(f"Error syncing user {email} to MongoDB: {e}")
+
 @st.cache_data(ttl=120)
 def fetch_filtered_users(domain="@niagarawater.com"):
     """Fetches all users from Firebase Authentication and filters them by email domain."""
@@ -92,6 +112,20 @@ def fetch_filtered_users(domain="@niagarawater.com"):
     except Exception as e:
         st.error(f"Error fetching Firebase users: {e}")
         return pd.DataFrame()
+
+# --- NEW FUNCTION ---
+@st.cache_data(ttl=60)
+def fetch_mongodb_user_ids():
+    """Fetches all existing user UIDs from MongoDB to check for sync status."""
+    if mongodb_collection is None:
+        return set()
+    try:
+        # Fetch only the userId field to be efficient
+        user_docs = mongodb_collection.find({}, {"userId": 1, "_id": 0})
+        return {doc.get("userId") for doc in user_docs if doc.get("userId")}
+    except Exception as e:
+        st.error(f"Could not fetch user IDs from MongoDB: {e}")
+        return set()
 
 
 @st.cache_data
@@ -125,6 +159,7 @@ def add_users_dialog():
                 try:
                     user = auth.create_user(email=email, password=password)
                     st.success(f"Successfully created user: {user.email}")
+                    add_user_to_mongodb(user.uid, user.email)
                     st.session_state.user_added = True
                 except Exception as e:
                     st.error(f"Failed to create user: {e}")
@@ -148,7 +183,7 @@ def add_users_dialog():
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
         if uploaded_file is not None:
-            if st.button("Create Users from CSV", type="primary", use_container_width=True):
+            if st.button("Create Users from CSV", type="primary", width='stretch'):
                 try:
                     df = pd.read_csv(uploaded_file)
                     if not {'email', 'password'}.issubset(df.columns):
@@ -179,6 +214,8 @@ def add_users_dialog():
                         try:
                             auth.create_user(email=email, password=str(password))
                             success_count += 1
+                            new_user = auth.get_user_by_email(email)
+                            add_user_to_mongodb(new_user.uid, new_user.email)
                         except Exception as e:
                             errors.append((email, str(e)))
 
@@ -254,20 +291,29 @@ no_selection = st.session_state.selected_rows.empty
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    if st.button("➕ Add New User(s)", use_container_width=True , disabled=True):
+    if st.button("➕ Add New User(s)", width='stretch'):
         add_users_dialog()
 with col2:
-    if st.button("🔑 Reset Password...", use_container_width=True, disabled=no_selection):
+    if st.button("🔑 Reset Password...", width='stretch', disabled=no_selection):
         reset_password_dialog(st.session_state.selected_rows)
 with col3:
-    if st.button("❌ Delete Selected", type="primary", use_container_width=True, disabled=no_selection):
+    if st.button("❌ Delete Selected", type="primary", width='stretch', disabled=no_selection):
         with st.spinner(f"Deleting {len(st.session_state.selected_rows)} user(s)..."):
-            for uid in st.session_state.selected_rows["uid"]:
+            for index, row in st.session_state.selected_rows.iterrows():
+                uid, email = row['uid'], row['email']
                 try:
                     auth.delete_user(uid)
-                    st.toast(f"Deleted user {uid}.", icon="🗑️")
+                    st.toast(f"Deleted user {email} from Firebase.", icon="🔥")
+
+                    if mongodb_collection is not None:
+                        try:
+                            result = mongodb_collection.delete_one({"userId": uid})
+                            if result.deleted_count > 0:
+                                st.toast(f"Removed user {email} from MongoDB.", icon="📦")
+                        except Exception as e:
+                            st.error(f"Failed to remove {email} from MongoDB: {e}")
                 except Exception as e:
-                    st.error(f"Failed to delete {uid}: {e}")
+                    st.error(f"Failed to delete {email} from Firebase: {e}")
         st.success("Deletion process finished.")
         st.session_state.clear_selection = True
 
@@ -276,6 +322,15 @@ st.divider()
 if user_df.empty:
     st.info("No users found with the email domain @niagarawater.com.")
 else:
+    # --- MODIFICATION START ---
+    # Get the set of UIDs from MongoDB
+    mongodb_uids = fetch_mongodb_user_ids()
+    # Add a status column to the DataFrame based on whether the UID is in the set
+    user_df['status'] = user_df['uid'].apply(
+        lambda uid: "✅ Synced" if uid in mongodb_uids else "⚠️ Not Synced"
+    )
+    # --- MODIFICATION END ---
+
     user_df.insert(0, "Select", False)
     user_df['created'] = pd.to_datetime(user_df['created'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(
         'America/Chicago')
@@ -290,10 +345,13 @@ else:
         key="user_editor",
         hide_index=True,
         use_container_width=True,
-        column_order=("Select", "email", "created", "last_login"),
+        # Add 'status' to the column order
+        column_order=("Select", "email", "status", "created", "last_login"),
         column_config={
             "uid": None,
             "email": st.column_config.TextColumn("Email Address", disabled=True),
+            # Add a column config for the new status column
+            "status": st.column_config.TextColumn("Sync Status", disabled=True),
             "created": st.column_config.DatetimeColumn("Created (CDT)", format="YYYY-MM-DD hh:mm:ss A", disabled=True),
             "last_login": st.column_config.DatetimeColumn("Last Logged In (CDT)", format="YYYY-MM-DD hh:mm:ss A",
                                                           disabled=True),
