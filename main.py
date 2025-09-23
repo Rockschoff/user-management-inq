@@ -110,7 +110,8 @@ def create_sample_csv():
     return pd.DataFrame(sample_data).to_csv(index=False).encode('utf-8')
 
 
-# --- FIX: Removed the 'mongodb_collection' parameter from the function signature ---
+# --- Dialog Functions ---
+
 @st.dialog("Add New Users")
 def add_users_dialog():
     """Displays a dialog to add a single user or upload a CSV for bulk creation."""
@@ -132,9 +133,8 @@ def add_users_dialog():
                 try:
                     user = auth.create_user(email=email, password=password)
                     st.success(f"Successfully created user: {user.email}")
-                    # --- FIX: Corrected the function call to pass only required arguments ---
                     add_user_to_mongodb(user.uid, user.email)
-                    st.session_state.user_added = True
+                    st.session_state.refresh_needed = True # FIX: Set unified refresh flag
                 except Exception as e:
                     st.error(f"Failed to create user: {e}")
 
@@ -155,7 +155,7 @@ def add_users_dialog():
         )
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
         if uploaded_file is not None:
-            if st.button("Create Users from CSV", type="primary", width='stretch'):
+            if st.button("Create Users from CSV", type="primary"):
                 try:
                     df = pd.read_csv(uploaded_file)
                     if not {'email', 'password'}.issubset(df.columns):
@@ -185,7 +185,6 @@ def add_users_dialog():
                             auth.create_user(email=email, password=str(password))
                             success_count += 1
                             new_user = auth.get_user_by_email(email)
-                            # --- FIX: Corrected the function call here as well ---
                             add_user_to_mongodb(new_user.uid, new_user.email)
                         except Exception as e:
                             errors.append((email, str(e)))
@@ -197,7 +196,8 @@ def add_users_dialog():
                         with st.expander("View Error Details"):
                             error_df = pd.DataFrame(errors, columns=['Email', 'Error'])
                             st.dataframe(error_df, use_container_width=True)
-                    st.session_state.user_added = True
+                    if success_count > 0:
+                        st.session_state.refresh_needed = True # FIX: Set unified refresh flag
                 except Exception as e:
                     st.error(f"An error occurred while processing the file: {e}")
 
@@ -235,7 +235,34 @@ def reset_password_dialog(selected_users):
                 except Exception as e:
                     st.error(f"Failed for {email}: {e}")
         st.success("Password reset process complete.")
-        st.session_state.clear_selection = True
+        st.session_state.refresh_needed = True # FIX: Set unified refresh flag
+
+
+# --- FIX: New dialog function to confirm user deletion ---
+@st.dialog("Confirm Deletion")
+def delete_confirmation_dialog(selected_users, mongodb_collection):
+    """Displays a confirmation dialog before deleting users."""
+    user_count = len(selected_users)
+    st.warning(f"⚠️ You are about to permanently delete **{user_count}** user(s). This action cannot be undone.")
+
+    st.write("The following users will be deleted:")
+    for email in selected_users["email"]:
+        st.markdown(f"- `{email}`")
+
+    if st.button("Confirm and Delete Users", type="primary"):
+        with st.spinner(f"Deleting {user_count} user(s)..."):
+            for index, row in selected_users.iterrows():
+                uid, email = row['uid'], row['email']
+                try:
+                    auth.delete_user(uid)
+                    st.toast(f"Deleted user {email} from Firebase.", icon="🔥")
+                    if mongodb_collection is not None:
+                        mongodb_collection.delete_one({"userId": uid})
+                        st.toast(f"Removed user {email} from MongoDB.", icon="📦")
+                except Exception as e:
+                    st.error(f"Failed to delete {email}: {e}")
+        st.success("Deletion process finished.")
+        st.session_state.refresh_needed = True  # Set flag to refresh the main page
 
 
 def login_form():
@@ -263,6 +290,13 @@ def main_dashboard():
             st.session_state['authenticated'] = False
             st.rerun()
 
+    # --- FIX: Unified refresh logic at the beginning of the function ---
+    if st.session_state.get("refresh_needed"):
+        st.session_state.refresh_needed = False
+        st.session_state.selected_rows = pd.DataFrame()  # Always clear selection on refresh
+        st.cache_data.clear()
+        st.rerun()
+
     firebase_app = get_firebase_app()
     mongodb_collection = get_mongodb_collection()
 
@@ -279,36 +313,20 @@ def main_dashboard():
     if 'selected_rows' not in st.session_state:
         st.session_state.selected_rows = pd.DataFrame()
 
-    if st.session_state.get("user_added"):
-        st.cache_data.clear()
-        st.session_state.user_added = False
-        st.rerun()
-
     st.subheader("Actions")
     no_selection = st.session_state.selected_rows.empty
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("➕ Add New User(s)", width='stretch'):
+        if st.button("➕ Add New User(s)", use_container_width=True):
             add_users_dialog()
     with col2:
-        if st.button("🔑 Reset Password...", width='stretch', disabled=no_selection):
+        if st.button("🔑 Reset Password...", use_container_width=True, disabled=no_selection):
             reset_password_dialog(st.session_state.selected_rows)
     with col3:
-        if st.button("❌ Delete Selected", type="primary", width='stretch', disabled=no_selection):
-            with st.spinner(f"Deleting {len(st.session_state.selected_rows)} user(s)..."):
-                for index, row in st.session_state.selected_rows.iterrows():
-                    uid, email = row['uid'], row['email']
-                    try:
-                        auth.delete_user(uid)
-                        st.toast(f"Deleted user {email} from Firebase.", icon="🔥")
-                        if mongodb_collection is not None:
-                            mongodb_collection.delete_one({"userId": uid})
-                            st.toast(f"Removed user {email} from MongoDB.", icon="📦")
-                    except Exception as e:
-                        st.error(f"Failed to delete {email}: {e}")
-            st.success("Deletion process finished.")
-            st.session_state.clear_selection = True
+        # --- FIX: Call the new confirmation dialog instead of deleting directly ---
+        if st.button("❌ Delete Selected", type="primary", use_container_width=True, disabled=no_selection):
+            delete_confirmation_dialog(st.session_state.selected_rows, mongodb_collection)
 
     st.divider()
 
@@ -338,12 +356,6 @@ def main_dashboard():
         current_selection = edited_df[edited_df.Select]
         if not st.session_state.selected_rows.equals(current_selection):
             st.session_state.selected_rows = current_selection
-            st.rerun()
-
-        if st.session_state.get("clear_selection"):
-            st.session_state.selected_rows = pd.DataFrame()
-            st.session_state.clear_selection = False
-            st.cache_data.clear()
             st.rerun()
 
 
