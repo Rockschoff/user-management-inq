@@ -81,7 +81,7 @@ def fetch_filtered_users(domain="@niagarawater.com"):
             "created": user.user_metadata.creation_timestamp,
             "last_login": user.user_metadata.last_sign_in_timestamp,
         } for user in all_users if user.email and (user.email.endswith(
-            domain) or user.email == 'vdickinson@innovaqual.com' or user.email == "rishi@test.com")]
+            domain))]
         return pd.DataFrame(filtered_users_data)
     except Exception as e:
         st.error(f"Error fetching Firebase users: {e}")
