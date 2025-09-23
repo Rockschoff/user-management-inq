@@ -110,8 +110,9 @@ def create_sample_csv():
     return pd.DataFrame(sample_data).to_csv(index=False).encode('utf-8')
 
 
+# --- FIX: Removed the 'mongodb_collection' parameter from the function signature ---
 @st.dialog("Add New Users")
-def add_users_dialog(mongodb_collection):
+def add_users_dialog():
     """Displays a dialog to add a single user or upload a CSV for bulk creation."""
     tab1, tab2 = st.tabs(["👤 Add Single User", "📄 Upload CSV"])
 
@@ -131,7 +132,8 @@ def add_users_dialog(mongodb_collection):
                 try:
                     user = auth.create_user(email=email, password=password)
                     st.success(f"Successfully created user: {user.email}")
-                    add_user_to_mongodb(mongodb_collection, user.uid, user.email)
+                    # --- FIX: Corrected the function call to pass only required arguments ---
+                    add_user_to_mongodb(user.uid, user.email)
                     st.session_state.user_added = True
                 except Exception as e:
                     st.error(f"Failed to create user: {e}")
@@ -154,8 +156,50 @@ def add_users_dialog(mongodb_collection):
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
         if uploaded_file is not None:
             if st.button("Create Users from CSV", type="primary", width='stretch'):
-                # ... CSV creation logic (omitted for brevity, remains the same) ...
-                pass # The logic from the previous version is correct
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    if not {'email', 'password'}.issubset(df.columns):
+                        st.error("CSV must contain 'email' and 'password' columns.")
+                        return
+
+                    users_to_create = df.to_dict('records')
+                    success_count = 0
+                    errors = []
+                    progress_text = "Starting user creation..."
+                    bar = st.progress(0, text=progress_text)
+
+                    for i, user_data in enumerate(users_to_create):
+                        email = user_data.get('email')
+                        password = user_data.get('password')
+                        progress_text = f"Creating user ({i + 1}/{len(users_to_create)}): {email}"
+                        bar.progress((i + 1) / len(users_to_create), text=progress_text)
+
+                        if not email or not password or not isinstance(email, str):
+                            errors.append((email or "N/A", "Row is missing email or password."))
+                            continue
+                        if not email.endswith("@niagarawater.com"):
+                            errors.append((email, "Email does not have the required @niagarawater.com domain."))
+                            continue
+
+                        try:
+                            auth.create_user(email=email, password=str(password))
+                            success_count += 1
+                            new_user = auth.get_user_by_email(email)
+                            # --- FIX: Corrected the function call here as well ---
+                            add_user_to_mongodb(new_user.uid, new_user.email)
+                        except Exception as e:
+                            errors.append((email, str(e)))
+
+                    bar.empty()
+                    st.success(f"Process complete. Successfully created {success_count} user(s).")
+                    if errors:
+                        st.warning(f"Failed to create {len(errors)} user(s). See details below.")
+                        with st.expander("View Error Details"):
+                            error_df = pd.DataFrame(errors, columns=['Email', 'Error'])
+                            st.dataframe(error_df, use_container_width=True)
+                    st.session_state.user_added = True
+                except Exception as e:
+                    st.error(f"An error occurred while processing the file: {e}")
 
 
 @st.dialog("Reset Password for Selected User(s)")
@@ -171,16 +215,13 @@ def reset_password_dialog(selected_users):
         ["Send a password reset link", "Set a new temporary password"],
         key="reset_action", horizontal=True
     )
-
     new_password = None
     if "Set a new temporary password" in action:
         new_password = st.text_input("Enter new temporary password", type="password")
-
     if st.button("Confirm and Proceed", type="primary"):
         if "Set a new temporary password" in action and not new_password:
             st.warning("Please enter a new password.")
             return
-
         with st.spinner("Processing password resets..."):
             for index, user in selected_users.iterrows():
                 uid, email = user["uid"], user["email"]
@@ -277,10 +318,8 @@ def main_dashboard():
         mongodb_uids = fetch_mongodb_user_ids()
         user_df['status'] = user_df['uid'].apply(lambda uid: "✅ Synced" if uid in mongodb_uids else "⚠️ Not Synced")
         user_df.insert(0, "Select", False)
-        user_df['created'] = pd.to_datetime(user_df['created'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(
-            'America/Chicago')
-        user_df['last_login'] = pd.to_datetime(user_df['last_login'], unit='ms', errors='coerce').dt.tz_localize(
-            'UTC').dt.tz_convert('America/Chicago')
+        user_df['created'] = pd.to_datetime(user_df['created'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('America/Chicago')
+        user_df['last_login'] = pd.to_datetime(user_df['last_login'], unit='ms', errors='coerce').dt.tz_localize('UTC').dt.tz_convert('America/Chicago')
 
         st.subheader("User List")
         st.info("Select users via the checkbox. Actions can be performed with the buttons above.")
@@ -291,10 +330,8 @@ def main_dashboard():
             column_config={
                 "uid": None, "email": st.column_config.TextColumn("Email Address", disabled=True),
                 "status": st.column_config.TextColumn("Sync Status", disabled=True),
-                "created": st.column_config.DatetimeColumn("Created (CDT)", format="YYYY-MM-DD hh:mm:ss A",
-                                                           disabled=True),
-                "last_login": st.column_config.DatetimeColumn("Last Logged In (CDT)", format="YYYY-MM-DD hh:mm:ss A",
-                                                              disabled=True),
+                "created": st.column_config.DatetimeColumn("Created (CDT)", format="YYYY-MM-DD hh:mm:ss A", disabled=True),
+                "last_login": st.column_config.DatetimeColumn("Last Logged In (CDT)", format="YYYY-MM-DD hh:mm:ss A", disabled=True),
             }
         )
 
